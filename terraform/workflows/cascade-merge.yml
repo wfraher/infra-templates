@@ -1,0 +1,58 @@
+name: Cascade Merge
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  cascade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge main -> staging
+        id: staging
+        run: |
+          git checkout staging
+          git merge origin/main --no-edit
+          git push origin staging
+          echo "status=ok" >> $GITHUB_OUTPUT
+
+      - name: Merge staging -> dev
+        if: steps.staging.outputs.status == 'ok'
+        run: |
+          git checkout dev
+          git merge origin/staging --no-edit
+          git push origin dev
+
+      - name: Open issue on conflict
+        if: failure()
+        run: |
+          gh issue create \
+            --title "Cascade merge conflict — manual resolution needed" \
+            --body "Automatic merge-back from \`main → staging → dev\` hit a conflict.
+
+          **Triggered by:** ${{ github.sha }}
+
+          Please resolve manually:
+          \`\`\`bash
+          git fetch origin
+          git checkout staging && git merge origin/main
+          # resolve conflicts, commit, push
+          git checkout dev && git merge origin/staging
+          # resolve conflicts, commit, push
+          \`\`\`"
+        env:
+          GH_TOKEN: ${{ github.token }}

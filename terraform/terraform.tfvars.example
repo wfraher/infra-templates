@@ -1,0 +1,41 @@
+# Copy to terraform.tfvars and fill in your values.
+# terraform.tfvars is gitignored — never commit secrets.
+
+project_name            = "my-app"
+github_owner            = "your-github-username"
+github_repo_description = "Full-stack app with CI/CD"
+github_repo_visibility  = "private"
+
+# Tokens (use env vars TF_VAR_github_token etc. to avoid writing to disk)
+# github_token      = ""
+# vercel_token      = ""
+# railway_api_token = ""
+
+# Set after creating the Railway project manually
+railway_project_id     = ""
+railway_dev_service_id = ""
+
+# Vercel team (null for personal accounts)
+vercel_team_id     = null
+vercel_root_directory = "web"
+
+env_config = {
+  production = {
+    api_url   = "https://my-app-production.up.railway.app"
+    api_token = "prod-token-here"
+  }
+  staging = {
+    api_url   = "https://my-app-staging.up.railway.app"
+    api_token = "staging-token-here"
+  }
+  preview = {
+    api_url   = "https://my-app-dev.up.railway.app"
+    api_token = "dev-token-here"
+  }
+}
+
+# Additional CI secrets (optional)
+# extra_github_secrets = {
+#   CI_DEEPSEEK_API_KEY = "sk-..."
+#   CI_BRAVE_API_KEY    = "BSA..."
+# }

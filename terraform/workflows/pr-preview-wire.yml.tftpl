@@ -1,0 +1,132 @@
+name: Wire PR Preview Deploys
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [dev]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  RAILWAY_PROJECT_ID: "${railway_project_id}"
+  RAILWAY_DEV_SERVICE_ID: "${railway_dev_service_id}"
+  VERCEL_PROJECT_ID: "${vercel_project_id}"
+
+jobs:
+  wire-preview:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for Railway PR deploy
+        id: railway
+        env:
+          RAILWAY_API_TOKEN: $${{ secrets.RAILWAY_API_TOKEN }}
+          PR_NUM: $${{ github.event.pull_request.number }}
+        run: |
+          for i in $(seq 1 30); do
+            RESULT=$(curl -s -X POST https://backboard.railway.com/graphql/v2 \
+              -H "Authorization: Bearer $${RAILWAY_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "{\"query\": \"query { project(id: \\\"$${RAILWAY_PROJECT_ID}\\\") { environments { edges { node { id name serviceInstances { edges { node { domains { serviceDomains { domain } } serviceId } } } } } } } }\"}")
+
+            PR_DOMAIN=$(echo "$RESULT" | python3 -c "
+          import sys, json, os
+          data = json.load(sys.stdin)
+          envs = data.get('data', {}).get('project', {}).get('environments', {}).get('edges', [])
+          svc_id = os.environ.get('RAILWAY_DEV_SERVICE_ID', '')
+          pr = os.environ.get('PR_NUM', '')
+          for env in envs:
+              node = env['node']
+              if ('pr-' + pr) in node.get('name', '').lower():
+                  for inst in node.get('serviceInstances', {}).get('edges', []):
+                      svc = inst['node']
+                      if svc.get('serviceId') == svc_id:
+                          domains = svc.get('domains', {}).get('serviceDomains', [])
+                          if domains:
+                              print(domains[0]['domain']); sys.exit(0)
+          sys.exit(1)" || true)
+
+            if [ -n "$PR_DOMAIN" ]; then
+              echo "railway_url=https://$${PR_DOMAIN}" >> $GITHUB_OUTPUT
+              break
+            fi
+            echo "Attempt $${i}/30 — waiting 10s..."
+            sleep 10
+          done
+
+          if [ -z "$PR_DOMAIN" ]; then
+            echo "::warning::Railway PR deploy not found after 5 minutes"
+            echo "railway_url=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set Vercel env var and redeploy
+        if: steps.railway.outputs.railway_url != ''
+        env:
+          VERCEL_TOKEN: $${{ secrets.VERCEL_TOKEN }}
+          RAILWAY_URL: $${{ steps.railway.outputs.railway_url }}
+          BRANCH: $${{ github.head_ref }}
+        run: |
+          RESULT=$(curl -s -w "\n%{http_code}" -X POST \
+            "https://api.vercel.com/v10/projects/$${VERCEL_PROJECT_ID}/env" \
+            -H "Authorization: Bearer $${VERCEL_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"key\": \"NEXT_PUBLIC_API_URL\",
+              \"value\": \"$${RAILWAY_URL}\",
+              \"type\": \"plain\",
+              \"target\": [\"preview\"],
+              \"gitBranch\": \"$${BRANCH}\"
+            }")
+
+          HTTP_CODE=$(echo "$RESULT" | tail -1)
+          BODY=$(echo "$RESULT" | sed '$d')
+
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
+            ENV_ID=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error',{}).get('envVarId',''))" 2>/dev/null || true)
+            if [ -n "$ENV_ID" ]; then
+              curl -s -X PATCH \
+                "https://api.vercel.com/v10/projects/$${VERCEL_PROJECT_ID}/env/$${ENV_ID}" \
+                -H "Authorization: Bearer $${VERCEL_TOKEN}" \
+                -H "Content-Type: application/json" \
+                -d "{\"value\": \"$${RAILWAY_URL}\"}" > /dev/null
+            fi
+          fi
+
+          DEPLOYMENT=$(curl -s -H "Authorization: Bearer $${VERCEL_TOKEN}" \
+            "https://api.vercel.com/v6/deployments?projectId=$${VERCEL_PROJECT_ID}&limit=10" \
+            | python3 -c "
+          import sys, json, os
+          branch = os.environ['BRANCH']
+          for d in json.load(sys.stdin).get('deployments', []):
+              if d.get('meta', {}).get('githubCommitRef') == branch:
+                  print(d['uid']); sys.exit(0)
+          sys.exit(1)" 2>/dev/null || true)
+
+          if [ -n "$DEPLOYMENT" ]; then
+            DEPLOY_NAME=$(curl -s -H "Authorization: Bearer $${VERCEL_TOKEN}" \
+              "https://api.vercel.com/v13/deployments/$${DEPLOYMENT}" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('name','app'))" 2>/dev/null || echo "app")
+            curl -s -X POST "https://api.vercel.com/v13/deployments" \
+              -H "Authorization: Bearer $${VERCEL_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "{\"name\": \"$${DEPLOY_NAME}\", \"deploymentId\": \"$${DEPLOYMENT}\", \"target\": \"preview\"}"
+          fi
+
+      - name: Comment PR with preview URLs
+        if: steps.railway.outputs.railway_url != ''
+        env:
+          GH_TOKEN: $${{ github.token }}
+          RAILWAY_URL: $${{ steps.railway.outputs.railway_url }}
+        run: |
+          BRANCH_SLUG=$(echo "$${{ github.head_ref }}" | sed 's|/|-|g')
+          gh pr comment $${{ github.event.pull_request.number }} \
+            --repo $${{ github.repository }} \
+            --body "## Preview Deploys
+          | Layer | URL |
+          |---|---|
+          | **Frontend** | Vercel preview (check Deployments tab) |
+          | **Backend** | $${RAILWAY_URL} |
+          | **Health** | $${RAILWAY_URL}/health |
+
+          > Frontend redeployed to point at PR-specific backend."

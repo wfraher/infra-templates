@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [dev, staging, main]
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '20'
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  quick-checks:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}' }
+      - run: npm ci
+        working-directory: web
+      - run: npm run lint
+        working-directory: web
+      - run: npx tsc --noEmit
+        working-directory: web
+      - run: npx next build
+        working-directory: web
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PYTHON_VERSION }}' }
+      - run: pip install -r requirements.txt -r api/requirements.txt ruff
+      - run: ruff check .
+
+  full-tests:
+    if: github.event_name == 'pull_request' || contains(fromJSON('["refs/heads/dev", "refs/heads/staging", "refs/heads/main"]'), github.ref)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}' }
+      - run: npm ci
+        working-directory: web
+      - run: npm run lint && npx tsc --noEmit && npx next build
+        working-directory: web
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PYTHON_VERSION }}' }
+      - run: pip install -r requirements.txt -r api/requirements.txt pytest ruff
+      - run: ruff check .
+      - run: python -m pytest tests/ api/tests/ -v
